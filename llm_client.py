@@ -3,42 +3,82 @@
 import json
 import os
 import re
-import ollama
 
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
 
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
-# 현재 사용 모델
-# 한국어 품질이 너무 떨어지면 아래 모델도 테스트:
-# MODEL_NAME = "exaone3.5:2.4b"
-# MODEL_NAME = "qwen2.5:3b"
+try:
+    import ollama
+except ImportError:
+    ollama = None
+
+
+# 로컬 Ollama에서 사용할 기본 모델
+# 배포 환경에서는 Streamlit Secrets의 LLM_PROVIDER="openai"를 사용한다.
 MODEL_NAME = "qwen2.5:3b"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
 
 
 def get_secret(name, default=None):
+    """
+    Streamlit Cloud secrets 또는 로컬 환경변수에서 값을 읽는다.
+    우선순위:
+    1. 환경변수
+    2. Streamlit secrets
+    3. default
+    """
     value = os.getenv(name)
     if value:
         return value
 
-    try:
-        import streamlit as st
-        value = st.secrets.get(name)
-        return value if value else default
-    except Exception:
-        return default
+    if st is not None:
+        try:
+            value = st.secrets.get(name)
+            return value if value else default
+        except Exception:
+            pass
+
+    return default
+
+
+def get_system_prompt():
+    """
+    모든 LLM 호출에 공통으로 적용할 시스템 프롬프트.
+    """
+    return (
+        "너는 한국어 문장력이 좋은 소비자 리서처이자 FGI 분석가다. "
+        "응답은 반드시 자연스러운 한국어로 작성한다. "
+        "분석 대상과 직접 관련된 내용만 다룬다. "
+        "페르소나 설명을 그대로 반복하지 말고, 소비자 반응으로 재해석한다. "
+        "어색한 조어, 번역투, 비문을 피한다. "
+        "없는 사실을 과도하게 지어내지 않는다. "
+        "실제 조사 결과처럼 단정하지 않고, synthetic persona 기반 가상 FGI 반응으로 표현한다."
+    )
 
 
 def ask_openai(prompt, temperature=0.6, json_mode=False):
+    """
+    Streamlit Cloud 배포 환경에서 OpenAI API를 호출한다.
+    """
     if OpenAI is None:
-        raise RuntimeError("openai 패키지가 설치되어 있지 않습니다.")
+        raise RuntimeError(
+            "openai 패키지가 설치되어 있지 않습니다. "
+            "requirements.txt에 openai가 포함되어 있는지 확인해 주세요."
+        )
 
     api_key = get_secret("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다.")
+        raise RuntimeError(
+            "OPENAI_API_KEY가 설정되어 있지 않습니다. "
+            "Streamlit Cloud의 Secrets에 OPENAI_API_KEY를 추가해 주세요."
+        )
 
     model = get_secret("OPENAI_MODEL", OPENAI_MODEL_NAME)
     client = OpenAI(api_key=api_key)
@@ -48,14 +88,7 @@ def ask_openai(prompt, temperature=0.6, json_mode=False):
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "너는 한국어 문장력이 좋은 소비자 리서처이자 FGI 분석가다. "
-                    "응답은 반드시 자연스러운 한국어로 작성한다. "
-                    "분석 대상과 직접 관련된 내용만 다룬다. "
-                    "페르소나 설명을 그대로 반복하지 말고, 소비자 반응으로 재해석한다. "
-                    "어색한 조어, 번역투, 비문을 피한다. "
-                    "없는 사실을 과도하게 지어내지 않는다."
-                )
+                "content": get_system_prompt()
             },
             {
                 "role": "user",
@@ -72,29 +105,23 @@ def ask_openai(prompt, temperature=0.6, json_mode=False):
     return response.choices[0].message.content or ""
 
 
-def ask_llm(prompt, temperature=0.6, json_mode=False):
+def ask_ollama(prompt, temperature=0.6, json_mode=False):
     """
-    Ollama 로컬 LLM에게 프롬프트를 보내고 응답 텍스트를 받는다.
-    json_mode=True일 때는 Ollama의 JSON 출력 모드를 시도한다.
+    로컬 개발 환경에서 Ollama를 호출한다.
+    Streamlit Cloud에서는 보통 사용하지 않는다.
     """
-    provider = str(get_secret("LLM_PROVIDER", "auto")).lower()
-
-    if provider == "openai" or (provider == "auto" and get_secret("OPENAI_API_KEY")):
-        return ask_openai(prompt, temperature=temperature, json_mode=json_mode)
+    if ollama is None:
+        raise RuntimeError(
+            "Ollama가 설치되어 있지 않습니다. "
+            "배포 환경에서는 LLM_PROVIDER='openai'와 OPENAI_API_KEY를 설정해야 합니다."
+        )
 
     kwargs = {
         "model": MODEL_NAME,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "너는 한국어 문장력이 좋은 소비자 리서처이자 FGI 분석가다. "
-                    "응답은 반드시 자연스러운 한국어로 작성한다. "
-                    "분석 대상과 직접 관련된 내용만 다룬다. "
-                    "페르소나 설명을 그대로 반복하지 말고, 소비자 반응으로 재해석한다. "
-                    "어색한 조어, 번역투, 비문을 피한다. "
-                    "없는 사실을 과도하게 지어내지 않는다."
-                )
+                "content": get_system_prompt()
             },
             {
                 "role": "user",
@@ -118,15 +145,42 @@ def ask_llm(prompt, temperature=0.6, json_mode=False):
     return response["message"]["content"]
 
 
+def ask_llm(prompt, temperature=0.6, json_mode=False):
+    """
+    LLM Provider를 자동 선택한다.
+
+    Streamlit Cloud:
+    - Secrets에 LLM_PROVIDER="openai"와 OPENAI_API_KEY가 있으면 OpenAI 사용
+
+    Local:
+    - OPENAI_API_KEY가 없고 Ollama가 설치되어 있으면 Ollama 사용
+    """
+    provider = str(get_secret("LLM_PROVIDER", "auto")).lower()
+
+    if provider == "openai":
+        return ask_openai(prompt, temperature=temperature, json_mode=json_mode)
+
+    if provider == "ollama":
+        return ask_ollama(prompt, temperature=temperature, json_mode=json_mode)
+
+    # auto mode
+    if get_secret("OPENAI_API_KEY"):
+        return ask_openai(prompt, temperature=temperature, json_mode=json_mode)
+
+    return ask_ollama(prompt, temperature=temperature, json_mode=json_mode)
+
+
 def extract_json_from_text(text):
     """
     LLM 응답에서 JSON 객체만 추출한다.
-    모델이 실수로 앞뒤에 설명을 붙여도 JSON 부분만 파싱하기 위한 함수.
+    모델이 실수로 markdown 코드블록이나 앞뒤 설명을 붙여도 JSON 부분만 파싱한다.
     """
     if not isinstance(text, str):
         raise ValueError("LLM 응답이 문자열이 아닙니다.")
 
     text = text.strip()
+
+    # ```json ... ``` 제거
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
 
@@ -135,16 +189,19 @@ def extract_json_from_text(text):
     except json.JSONDecodeError:
         pass
 
+    # 텍스트 중간의 첫 번째 JSON object 탐색
     decoder = json.JSONDecoder()
     for idx, char in enumerate(text):
         if char != "{":
             continue
+
         try:
             parsed, _ = decoder.raw_decode(text[idx:])
             return parsed
         except json.JSONDecodeError:
             continue
 
+    # 마지막 fallback: 첫 {부터 마지막 }까지 추출
     start = text.find("{")
     end = text.rfind("}")
 
@@ -153,6 +210,7 @@ def extract_json_from_text(text):
 
     json_text = text[start:end + 1]
     json_text = re.sub(r",\s*([}\]])", r"\1", json_text)
+
     return json.loads(json_text)
 
 
@@ -451,6 +509,7 @@ def generate_persona_response(persona, plan):
 }}
 """
     raw = ""
+
     try:
         raw = ask_llm(prompt, temperature=0.0, json_mode=True)
         data = extract_json_from_text(raw)
@@ -508,7 +567,10 @@ def _fallback_journey_map_from_personas(plan, persona_responses):
         })
 
     return {
-        "scenario": f"{plan.get('target_description', '대표 고객')}이 {plan.get('item_description', '분석 대상')}을 인지하고 검토하는 과정",
+        "scenario": (
+            f"{plan.get('target_description', '대표 고객')}이 "
+            f"{plan.get('item_description', '분석 대상')}을 인지하고 검토하는 과정"
+        ),
         "journey_map": journey
     }
 
@@ -615,10 +677,12 @@ def generate_journey_map(plan, persona_responses):
 }}
 """
     raw = ""
+
     try:
         raw = ask_llm(prompt, temperature=0.0, json_mode=True)
         data = extract_json_from_text(raw)
         return normalize_journey_result(data, plan, persona_responses)
+
     except Exception as e:
         print("\nJourney Map JSON 파싱 실패")
         print("원인:", e)
@@ -696,11 +760,14 @@ C안: ...
 """
     try:
         return ask_llm(prompt, temperature=0.4)
+
     except Exception as e:
         return (
             "## 종합 인사이트\n\n"
-            "로컬 LLM 호출에 실패해 자동 종합 인사이트를 생성하지 못했습니다.\n\n"
+            "LLM 호출에 실패해 자동 종합 인사이트를 생성하지 못했습니다.\n\n"
             f"- 원인: {e}\n"
-            "- Ollama가 실행 중인지, 설정된 모델이 설치되어 있는지 확인한 뒤 다시 실행해 주세요.\n"
+            "- Streamlit Cloud 배포 환경에서는 Secrets에 LLM_PROVIDER='openai', "
+            "OPENAI_API_KEY, OPENAI_MODEL이 설정되어 있는지 확인해 주세요.\n"
+            "- 로컬 환경에서는 Ollama가 실행 중인지, 설정된 모델이 설치되어 있는지 확인해 주세요.\n"
             "- 개별 페르소나 응답이 생성되어 있다면 CSV/Markdown 다운로드로 원자료를 확인할 수 있습니다.\n"
         )
